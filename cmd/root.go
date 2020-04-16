@@ -41,6 +41,13 @@ func configureCommand(cmd *cobra.Command) {
 	)
 	bind(cmd, "log")
 
+	cmd.PersistentFlags().StringP(
+		"logfile", "",
+		"",
+		"Log file (/etc/evcc.log)",
+	)
+	bind(cmd, "logfile")
+
 	cmd.PersistentFlags().StringVarP(&cfgFile,
 		"config", "c",
 		"",
@@ -114,13 +121,23 @@ func Execute() {
 	}
 }
 
-func configureLogging(level string) {
-	api.OutThreshold = api.LogLevelToThreshold(level)
-	api.LogThreshold = api.OutThreshold
-	api.Loggers(func(name string, logger *api.Logger) {
-		logger.SetStdoutThreshold(api.OutThreshold)
-	})
-}
+// func configureLogging(level, logfile string) {
+// 	api.OutThreshold = api.LogLevelToThreshold(level)
+// 	api.LogThreshold = api.OutThreshold
+
+// 	api.Loggers(func(name string, logger *api.Logger) {
+// 		logger.SetStdoutThreshold(api.OutThreshold)
+// 		logger.SetLogThreshold(api.LogThreshold)
+// 	})
+
+// 	if logfile != "" {
+// 		f, err := os.OpenFile(logfile, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+// 		if err != nil {
+// 			log.FATAL.Fatalf("error opening file: %v", err)
+// 		}
+// 		log.SetLogOutput(f)
+// 	}
+// }
 
 // checkVersion validates if updates are available
 func checkVersion() {
@@ -158,13 +175,15 @@ func tee(in chan core.Param) (chan core.Param, <-chan core.Param) {
 }
 
 func run(cmd *cobra.Command, args []string) {
-	level, _ := cmd.PersistentFlags().GetString("log")
-	configureLogging(level)
+	lc := &LogConfig{}
+	lc.Configure(cmd)
+	defer lc.file.Close()
+
 	log.INFO.Printf("evcc %s (%s)", server.Version, server.Commit)
 
 	// load config and re-configure logging after reading config file
 	conf := loadConfigFile(cfgFile)
-	configureLogging(conf.Log)
+	lc.Configure(cmd)
 
 	go checkVersion()
 

@@ -11,6 +11,7 @@ import (
 type config struct {
 	URI        string
 	Log        string
+	LogFile    string
 	Interval   time.Duration
 	Mqtt       mqttConfig
 	Influx     influxConfig

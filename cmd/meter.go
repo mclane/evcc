@@ -23,8 +23,9 @@ func init() {
 }
 
 func runMeter(cmd *cobra.Command, args []string) {
-	level, _ := cmd.PersistentFlags().GetString("log")
-	configureLogging(level)
+	lc := &LogConfig{}
+	lc.Configure(cmd)
+
 	log.INFO.Printf("evcc %s (%s)", server.Version, server.Commit)
 
 	// load config
