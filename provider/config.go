@@ -1,14 +1,14 @@
 package provider
 
 import (
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/andig/evcc/util"
-)
-
-const (
-	execTimeout = 5 * time.Second
+	"github.com/benbjohnson/clock"
+	"github.com/savaki/jq"
 )
 
 // Config is the general provider config
@@ -17,146 +17,202 @@ type Config struct {
 	Other map[string]interface{} `mapstructure:",remain"`
 }
 
-// mqttConfig is the specific mqtt getter/setter configuration
-type mqttConfig struct {
-	Topic, Payload string // Payload only applies to setters
-	Multiplier     float64
-	Timeout        time.Duration
-}
-
-// scriptConfig is the specific script getter/setter configuration
-type scriptConfig struct {
-	Cmd     string
-	Timeout time.Duration
-	Cache   time.Duration
-}
-
 // MQTT singleton
 var MQTT *MqttClient
 
-func mqttFromConfig(log *util.Logger, other map[string]interface{}) mqttConfig {
-	if MQTT == nil {
-		log.FATAL.Fatal("mqtt not configured")
+func wrappedStringGetterFromConfig(log *util.Logger, stringG StringGetter, other map[string]interface{}) (
+	StringGetter, map[string]interface{},
+) {
+	var cc struct {
+		Jq    string
+		Cache time.Duration
+		Other map[string]interface{}
+	}
+	util.DecodeOther(log, other, &cc)
+
+	// decorate cache
+	if cc.Cache != 0 {
+		clock := clock.New()
+		var updated time.Time
+		var val string
+
+		stringG = StringGetter(func() (string, error) {
+			if clock.Since(updated) > cc.Cache {
+				new, err := stringG()
+				if err != nil {
+					return new, err
+				}
+
+				updated = clock.Now()
+				val = new
+			}
+
+			return val, nil
+		})
 	}
 
-	var pc mqttConfig
-	util.DecodeOther(log, other, &pc)
-
-	if pc.Multiplier == 0 {
-		pc.Multiplier = 1
+	if cc.Jq == "" {
+		return stringG, nil
 	}
 
-	return pc
+	jqOp, err := jq.Parse(cc.Jq)
+	if err != nil {
+		log.FATAL.Fatalf("config: invalid jq query: %s", cc.Jq)
+	}
+
+	// decorate jq
+	return StringGetter(func() (string, error) {
+		s, err := stringG()
+		if err != nil {
+			return s, err
+		}
+
+		b, err := jqOp.Apply([]byte(s))
+		return string(b), err
+	}), cc.Other
 }
 
-func scriptFromConfig(log *util.Logger, other map[string]interface{}) scriptConfig {
-	var pc scriptConfig
-	util.DecodeOther(log, other, &pc)
-
-	if pc.Timeout == 0 {
-		pc.Timeout = execTimeout
-	}
-
-	return pc
-}
-
-// NewFloatGetterFromConfig creates a FloatGetter from config
-func NewFloatGetterFromConfig(log *util.Logger, config Config) (res FloatGetter) {
+// stringGetterFromConfig creates a StringGetter from config
+func stringGetterFromConfig(log *util.Logger, config Config) (
+	res StringGetter, other map[string]interface{},
+) {
 	switch strings.ToLower(config.Type) {
-	case "http":
-		res = NewHTTPProviderFromConfig(log, config.Other).FloatGetter
-		if pc.Cache > 0 {
-			res = NewCached(log, res, pc.Cache).FloatGetter()
-		}
 	case "mqtt":
-		pc := mqttFromConfig(log, config.Other)
-		res = MQTT.FloatGetter(pc.Topic, pc.Multiplier, pc.Timeout)
-	case "script":
-		pc := scriptFromConfig(log, config.Other)
-		res = NewScriptProvider(pc.Timeout).FloatGetter(pc.Cmd)
-		if pc.Cache > 0 {
-			res = NewCached(log, res, pc.Cache).FloatGetter()
+		if MQTT == nil {
+			log.FATAL.Fatal("mqtt not configured")
 		}
-	case "modbus-rtu", "modbus-tcp", "modbus-rtuovertcp", "modbus-tcprtu", "modbus-rtutcp":
-		res = FloatGetter(NewModbusFromConfig(log, config.Type, config.Other).FloatGetter)
+
+		var cc struct {
+			Topic   string
+			Timeout time.Duration
+			Other   map[string]interface{}
+		}
+		util.DecodeOther(log, config.Other, &cc)
+		other = cc.Other // remainder
+
+		res = MQTT.StringGetter(cc.Topic, cc.Timeout)
+
+	case "script":
+		var cc struct {
+			Cmd     string
+			Timeout time.Duration
+			Other   map[string]interface{}
+		}
+		util.DecodeOther(log, config.Other, &cc)
+		other = cc.Other // remainder
+
+		res = NewScriptProvider(log, cc.Cmd, cc.Timeout).StringGetter
+
+	case "combined":
+		res = openWBStatusFromConfig(log, config.Other)
+
 	default:
 		log.FATAL.Fatalf("invalid provider type %s", config.Type)
 	}
 
-	return
-}
-
-// NewIntGetterFromConfig creates a IntGetter from config
-func NewIntGetterFromConfig(log *util.Logger, config Config) (res IntGetter) {
-	switch strings.ToLower(config.Type) {
-	case "mqtt":
-		pc := mqttFromConfig(log, config.Other)
-		res = MQTT.IntGetter(pc.Topic, int64(pc.Multiplier), pc.Timeout)
-	case "script":
-		pc := scriptFromConfig(log, config.Other)
-		res = NewScriptProvider(pc.Timeout).IntGetter(pc.Cmd)
-		if pc.Cache > 0 {
-			res = NewCached(log, res, pc.Cache).IntGetter()
-		}
-	case "modbus-rtu", "modbus-tcp", "modbus-rtuovertcp", "modbus-tcprtu", "modbus-rtutcp":
-		res = IntGetter(NewModbusFromConfig(log, config.Type, config.Other).IntGetter)
-	default:
-		log.FATAL.Fatalf("invalid provider type %s", config.Type)
-	}
-
-	return
+	return wrappedStringGetterFromConfig(log, res, other)
 }
 
 // NewStringGetterFromConfig creates a StringGetter from config
-func NewStringGetterFromConfig(log *util.Logger, config Config) (res StringGetter) {
-	switch strings.ToLower(config.Type) {
-	case "mqtt":
-		pc := mqttFromConfig(log, config.Other)
-		res = MQTT.StringGetter(pc.Topic, pc.Timeout)
-	case "script":
-		pc := scriptFromConfig(log, config.Other)
-		res = NewScriptProvider(pc.Timeout).StringGetter(pc.Cmd)
-		if pc.Cache > 0 {
-			res = NewCached(log, res, pc.Cache).StringGetter()
-		}
-	case "combined", "openwb":
-		res = openWBStatusFromConfig(log, config.Other)
-	default:
-		log.FATAL.Fatalf("invalid provider type %s", config.Type)
+func NewStringGetterFromConfig(log *util.Logger, config Config) StringGetter {
+	stringG, other := stringGetterFromConfig(log, config)
+
+	if len(other) > 0 {
+		log.FATAL.Fatalf("config: unexpected config %+v", other)
 	}
 
-	return
+	return stringG
+}
+
+func floatGetterFromConfig(log *util.Logger, stringG StringGetter, other map[string]interface{}) (
+	FloatGetter, map[string]interface{},
+) {
+	var cc struct {
+		Scale float64
+		Other map[string]interface{}
+	}
+	util.DecodeOther(log, other, &cc)
+
+	return FloatGetter(func() (float64, error) {
+		s, err := stringG()
+		if err != nil {
+			return 0, err
+		}
+
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return 0, err
+		}
+
+		if cc.Scale > 0 {
+			f *= cc.Scale
+		}
+
+		return f, nil
+	}), cc.Other
+}
+
+// NewFloatGetterFromConfig creates a FloatGetter from config
+func NewFloatGetterFromConfig(log *util.Logger, config Config) FloatGetter {
+	stringG, other := stringGetterFromConfig(log, config)
+	floatG, other := floatGetterFromConfig(log, stringG, other)
+
+	if len(other) > 0 {
+		log.FATAL.Fatalf("config: unexpected config %+v", other)
+	}
+
+	return floatG
+}
+
+// NewIntGetterFromConfig creates a IntGetter from config
+func NewIntGetterFromConfig(log *util.Logger, config Config) IntGetter {
+	floatG := NewFloatGetterFromConfig(log, config)
+
+	return IntGetter(func() (int64, error) {
+		f, err := floatG()
+		return int64(math.Round(f)), err
+	})
 }
 
 // NewBoolGetterFromConfig creates a BoolGetter from config
-func NewBoolGetterFromConfig(log *util.Logger, config Config) (res BoolGetter) {
-	switch strings.ToLower(config.Type) {
-	case "mqtt":
-		pc := mqttFromConfig(log, config.Other)
-		res = MQTT.BoolGetter(pc.Topic, pc.Timeout)
-	case "script":
-		pc := scriptFromConfig(log, config.Other)
-		res = NewScriptProvider(pc.Timeout).BoolGetter(pc.Cmd)
-		if pc.Cache > 0 {
-			res = NewCached(log, res, pc.Cache).BoolGetter()
-		}
-	default:
-		log.FATAL.Fatalf("invalid provider type %s", config.Type)
-	}
+func NewBoolGetterFromConfig(log *util.Logger, config Config) BoolGetter {
+	stringG := NewStringGetterFromConfig(log, config)
 
-	return
+	return BoolGetter(func() (bool, error) {
+		s, err := stringG()
+		if err != nil {
+			return false, err
+		}
+		return util.Truish(s), nil
+	})
 }
 
 // NewIntSetterFromConfig creates a IntSetter from config
 func NewIntSetterFromConfig(log *util.Logger, param string, config Config) (res IntSetter) {
 	switch strings.ToLower(config.Type) {
 	case "mqtt":
-		pc := mqttFromConfig(log, config.Other)
-		res = MQTT.IntSetter(param, pc.Topic, pc.Payload)
+		if MQTT == nil {
+			log.FATAL.Fatal("mqtt not configured")
+		}
+
+		var cc struct {
+			Topic, Payload string
+			Timeout        time.Duration
+		}
+		util.DecodeOther(log, config.Other, &cc)
+
+		res = MQTT.IntSetter(param, cc.Topic, cc.Payload)
+
 	case "script":
-		pc := scriptFromConfig(log, config.Other)
-		exec := NewScriptProvider(pc.Timeout)
-		res = exec.IntSetter(param, pc.Cmd)
+		var cc struct {
+			Cmd     string
+			Timeout time.Duration
+		}
+		util.DecodeOther(log, config.Other, &cc)
+
+		exec := NewScriptProvider(log, cc.Cmd, cc.Timeout)
+		res = exec.IntSetter(param)
+
 	default:
 		log.FATAL.Fatalf("invalid setter type %s", config.Type)
 	}
@@ -167,12 +223,28 @@ func NewIntSetterFromConfig(log *util.Logger, param string, config Config) (res 
 func NewBoolSetterFromConfig(log *util.Logger, param string, config Config) (res BoolSetter) {
 	switch strings.ToLower(config.Type) {
 	case "mqtt":
-		pc := mqttFromConfig(log, config.Other)
-		res = MQTT.BoolSetter(param, pc.Topic, pc.Payload)
+		if MQTT == nil {
+			log.FATAL.Fatal("mqtt not configured")
+		}
+
+		var cc struct {
+			Topic, Payload string
+			Timeout        time.Duration
+		}
+		util.DecodeOther(log, config.Other, &cc)
+
+		res = MQTT.BoolSetter(param, cc.Topic, cc.Payload)
+
 	case "script":
-		pc := scriptFromConfig(log, config.Other)
-		exec := NewScriptProvider(pc.Timeout)
-		res = exec.BoolSetter(param, pc.Cmd)
+		var cc struct {
+			Cmd     string
+			Timeout time.Duration
+		}
+		util.DecodeOther(log, config.Other, &cc)
+
+		exec := NewScriptProvider(log, cc.Cmd, cc.Timeout)
+		res = exec.BoolSetter(param)
+
 	default:
 		log.FATAL.Fatalf("invalid setter type %s", config.Type)
 	}

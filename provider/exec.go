@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,134 +14,91 @@ import (
 // Script implements shell script-based providers and setters
 type Script struct {
 	log     *util.Logger
+	script  string
+	args    []string
 	timeout time.Duration
 }
 
 // NewScriptProvider creates a script provider.
 // Script execution is aborted after given timeout.
-func NewScriptProvider(timeout time.Duration) *Script {
+func NewScriptProvider(log *util.Logger, script string, timeout time.Duration) *Script {
+	if script == "" {
+		log.FATAL.Fatalf("config: missing script")
+	}
+
+	args, err := shellquote.Split(script)
+	if err != nil {
+		log.FATAL.Fatalf("config: cannot parse script: %s", script)
+	}
+
 	return &Script{
 		log:     util.NewLogger("exec"),
+		script:  script,
+		args:    args,
 		timeout: timeout,
 	}
 }
 
 // StringGetter returns string from exec result. Only STDOUT is considered.
-func (e *Script) StringGetter(script string) StringGetter {
-	args, err := shellquote.Split(script)
-	if err != nil {
-		panic(err)
-	} else if len(args) < 1 {
-		panic("exec: missing script")
-	}
+func (e *Script) StringGetter() (string, error) {
+	ctx := context.Background()
 
-	// return func to access cached value
-	return func() (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), e.timeout)
+	if e.timeout > 0 {
+		var cancel func()
+		ctx, cancel = context.WithTimeout(ctx, e.timeout)
 		defer cancel()
+	}
 
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		b, err := cmd.Output()
+	cmd := exec.CommandContext(ctx, e.args[0], e.args[1:]...)
+	b, err := cmd.Output()
 
-		s := strings.TrimSpace(string(b))
+	s := strings.TrimSpace(string(b))
 
-		if err != nil {
-			// use STDOUT if available
-			var ee *exec.ExitError
-			if errors.As(err, &ee) {
-				s = strings.TrimSpace(string(ee.Stderr))
-			}
-
-			e.log.ERROR.Printf("%s: %s", strings.Join(args, " "), s)
-			return "", err
+	if err != nil {
+		// use STDOUT if available
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			s = strings.TrimSpace(string(ee.Stderr))
 		}
 
-		e.log.TRACE.Printf("%s: %s", strings.Join(args, " "), s)
-		return s, nil
+		e.log.ERROR.Printf("%s: %s", strings.Join(e.args, " "), s)
+		return "", err
 	}
-}
 
-// IntGetter parses int64 from exec result
-func (e *Script) IntGetter(script string) IntGetter {
-	exec := e.StringGetter(script)
-
-	// return func to access cached value
-	return func() (int64, error) {
-		s, err := exec()
-		if err != nil {
-			return 0, err
-		}
-
-		return strconv.ParseInt(s, 10, 64)
-	}
-}
-
-// FloatGetter parses float from exec result
-func (e *Script) FloatGetter(script string) FloatGetter {
-	exec := e.StringGetter(script)
-
-	// return func to access cached value
-	return func() (float64, error) {
-		s, err := exec()
-		if err != nil {
-			return 0, err
-		}
-
-		return strconv.ParseFloat(s, 64)
-	}
-}
-
-// BoolGetter parses bool from exec result. "on", "true" and 1 are considerd truish.
-func (e *Script) BoolGetter(script string) BoolGetter {
-	exec := e.StringGetter(script)
-
-	// return func to access cached value
-	return func() (bool, error) {
-		s, err := exec()
-		if err != nil {
-			return false, err
-		}
-
-		return util.Truish(s), nil
-	}
+	e.log.TRACE.Printf("%s: %s", strings.Join(e.args, " "), s)
+	return s, nil
 }
 
 // IntSetter invokes script with parameter replaced by int value
-func (e *Script) IntSetter(param, script string) IntSetter {
+func (e *Script) IntSetter(param string) IntSetter {
 	// return func to access cached value
 	return func(i int64) error {
-		cmd, err := util.ReplaceFormatted(script, map[string]interface{}{
+		cmd, err := util.ReplaceFormatted(e.script, map[string]interface{}{
 			param: i,
 		})
-		if err != nil {
-			return err
+
+		if err == nil {
+			exec := NewScriptProvider(e.log, cmd, e.timeout)
+			_, err = exec.StringGetter()
 		}
 
-		exec := e.StringGetter(cmd)
-		if _, err := exec(); err != nil {
-			return err
-		}
-
-		return nil
+		return err
 	}
 }
 
 // BoolSetter invokes script with parameter replaced by bool value
-func (e *Script) BoolSetter(param, script string) BoolSetter {
+func (e *Script) BoolSetter(param string) BoolSetter {
 	// return func to access cached value
 	return func(b bool) error {
-		cmd, err := util.ReplaceFormatted(script, map[string]interface{}{
+		cmd, err := util.ReplaceFormatted(e.script, map[string]interface{}{
 			param: b,
 		})
-		if err != nil {
-			return err
+
+		if err == nil {
+			exec := NewScriptProvider(e.log, cmd, e.timeout)
+			_, err = exec.StringGetter()
 		}
 
-		exec := e.StringGetter(cmd)
-		if _, err := exec(); err != nil {
-			return err
-		}
-
-		return nil
+		return err
 	}
 }
