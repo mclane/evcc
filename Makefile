@@ -31,6 +31,14 @@ build:
 	@echo Version: $(VERSION) $(BUILD_DATE)
 	go build -v -tags=release -ldflags '-X "github.com/andig/evcc/server.Version=${VERSION}" -X "github.com/andig/evcc/server.Commit=${SHA}"'
 
+debian:
+	@echo Version: $(VERSION) $(BUILD_DATE)
+	docker build --tag andig/evcc:latest-debian -f debian.Dockerfile . && docker push andig/evcc:latest-debian
+
+ubuntu:
+	@echo Version: $(VERSION) $(BUILD_DATE)
+	docker build --tag andig/evcc:latest-ubuntu -f ubuntu.Dockerfile . && docker push andig/evcc:latest-ubuntu
+
 test-images:
 	@echo Version: $(VERSION) $(BUILD_DATE)
 	seihon publish -v "testing" --image-name andig/evcc --base-runtime-image alpine --dry-run=false --targets=amd64
